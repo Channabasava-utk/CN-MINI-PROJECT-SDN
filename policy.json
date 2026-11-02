@@ -1,0 +1,15 @@
+{
+    "roles": {
+        "user": {
+            "services": ["web"]
+        },
+        "admin": {
+            "services": ["web", "admin"]
+        }
+    },
+    "users": {
+        "alice": "user",
+        "bob": "admin",
+        "carol": "user"
+    }
+}
