@@ -1,14 +1,40 @@
 # CN Mini Project — SDN-Based Authentication and Network Access Control
 
-This repository contains the authentication and service-side components for the Computer Networks mini project. The system uses a TCP authentication service and a controller REST API to request temporary network access.
+This is the shared repository for the three-person Computer Networks mini project. Each team member has a separate workspace under `team/`; common configuration and project-wide setup stay at the root.
 
-## Team responsibilities
+## Team folder ownership
 
-- Channabasava: TCP authentication server and client, user sessions, controller requests, and service-side utilities.
-- Dhrithi: Mininet topology and Ryu SDN controller.
-- Chandravadan: event correlation, log analysis, monitoring, and visualization.
+| Team member | Folder | Responsibility |
+| --- | --- | --- |
+| Channabasava | `team/Channabasava/` | TCP authentication server/client, credential handling, sessions, service demonstrations, controller API client, and access probe |
+| Dhrithi | `team/Dhrithi/` | Ryu SDN controller and Mininet topology |
+| Chandravadan | `team/Chandravadan/` | Event correlation, log analysis, monitoring, and visualization |
 
-## Planned Mininet addressing
+Each person should upload their implementation into their own folder and update the corresponding README with setup/run instructions. Shared integration changes should be coordinated before merging.
+
+## Repository layout
+
+```text
+CN-MINI-PROJECT-SDN/
+├── team/
+│   ├── Channabasava/
+│   │   ├── auth/
+│   │   └── tests/
+│   ├── Dhrithi/
+│   │   ├── controller/
+│   │   └── topology/
+│   └── Chandravadan/
+│       ├── analysis/
+│       └── visualization/
+├── config.py
+├── policy.json
+├── requirements.txt
+├── data/
+├── .gitignore
+└── README.md
+```
+
+## Shared network plan
 
 | Node | Address | Purpose |
 | --- | --- | --- |
@@ -20,82 +46,44 @@ This repository contains the authentication and service-side components for the 
 | h6 | 10.0.0.6 | Admin service |
 | Controller | 10.0.0.254:8080 | Controller REST API |
 
-## Repository structure
+Shared network settings and role policy are maintained in root-level `config.py` and `policy.json`. Discuss changes to these files with all three members.
 
-- auth/server.py — TCP authentication server, login attempts, session creation/refresh/logout, expiry, and controller calls.
-- auth/client.py — command-line client for login, refresh, and logout.
-- auth/services.py — simple HTTP web and admin demonstration services.
-- auth/access_probe.py — TCP reachability probe for the two services.
-- auth/stub_controller.py — local mock REST controller for development and tests; it is not the Ryu controller.
-- auth/create_users.py — creates a local users.json with salted password hashes.
-- config.py — shared IP addresses, ports, timeouts, and thresholds.
-- policy.json — role-to-service policy.
-- tests/test_auth.py — 12 authentication unit tests.
-- data/ — runtime logs and probe results are generated here and intentionally not committed.
-
-## Local setup
+## Setup
 
 Use Python 3.9 or later. From the repository root:
 
-    python3 -m venv .venv
-    source .venv/bin/activate
-    python -m pip install -r requirements.txt
-    python auth/create_users.py
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python team/Channabasava/auth/create_users.py
+```
 
-The user creation script prompts for passwords for alice, bob, and carol and writes a local users.json. Passwords are not stored in plaintext. Do not commit or share users.json.
+The user-creation helper prompts locally for passwords for alice, bob, and carol, then generates a root-level `users.json` containing salted hashes. Do not commit or share this file.
 
-Run unit tests after creating users.json:
+Run Channabasava's unit tests:
 
-    python -m unittest discover -s tests -v
+```bash
+python -m unittest discover -s team/Channabasava/tests -v
+```
 
-## Local component test with the stub controller
+More detailed commands are in [Channabasava's README](team/Channabasava/README.md).
 
-Open separate terminals from the repository root. Activate the virtual environment in each terminal.
+## Controller API contract to integrate
 
-Terminal 1 — start the local stub controller:
+The authentication component currently expects the Ryu controller to implement:
+- `POST /acl/grant` — JSON: `ip`, `user`, `role`, `ttl`; successful response: `action: granted`.
+- `POST /acl/revoke` — JSON: `ip`, `reason`; successful response: `action: revoked`.
+- `POST /acl/block` — JSON: `ip`, `duration`, `reason`; successful response: `action: blocked`.
 
-    python auth/stub_controller.py
+Confirm exact request/response formats and controller address with Dhrithi's implementation before integrated testing.
 
-Terminal 2 — point the authentication server to the local stub and start it:
+## Integration status and limits
 
-    export CONTROLLER_URL=http://127.0.0.1:8080
-    python auth/server.py
+Channabasava's authentication module has been tested locally using a stub controller. The stub does not install OpenFlow rules and is not a replacement for the Ryu controller. The demo web/admin services also do not independently enforce role-specific access. Actual user/admin network restrictions must be verified against the combined Ryu controller and Mininet topology.
 
-Terminal 3 — start the demo web service:
+## Security and generated data
 
-    python auth/services.py web
-
-Terminal 4 — start the demo admin service:
-
-    python auth/services.py admin
-
-Terminal 5 — use the client:
-
-    export AUTH_SERVER_HOST=127.0.0.1
-    python auth/client.py login
-
-The client supports these actions: login, refresh, and logout. Use the session token returned by login for refresh or logout. The probe can be run with:
-
-    python auth/access_probe.py --host 127.0.0.1 --count 3
-
-The stub controller is for local development only. Its successful responses do not demonstrate real OpenFlow rule installation.
-
-## Controller REST contract
-
-The authentication server expects the controller to implement these POST endpoints:
-
-- POST /acl/grant — JSON body: ip, user, role, ttl. A successful response has action set to granted.
-- POST /acl/revoke — JSON body: ip, reason. A successful response has action set to revoked.
-- POST /acl/block — JSON body: ip, duration, reason. A successful response has action set to blocked.
-
-The server grants network access before returning AUTH_OK. If the controller request fails or returns an unexpected action, authentication fails closed. Confirm exact request and response formats with the Ryu controller implementation before integration.
-
-## Current implementation boundary
-
-The authentication code and its unit tests can be exercised locally using the stub controller. The stub is not connected to Mininet and does not install OpenFlow rules. The demo HTTP services listen on all interfaces and do not independently enforce user/admin roles. Actual user-versus-admin network access restrictions must be enforced and verified by the integrated SDN controller and Mininet topology.
-
-## Security and generated files
-
-- users.json contains salted password hashes and is generated locally; it is ignored by Git.
-- Authentication logs and access probe results can contain client IP addresses and are ignored by Git.
-- Do not commit passwords, session tokens, private keys, or other credentials.
+- `users.json`, runtime logs, virtual environments, Python caches, and local environment files are ignored by Git.
+- Do not commit passwords, password hashes, session tokens, private keys, or unredacted sensitive logs.
+- Use sanitized sample data when sharing analysis/visualization examples.

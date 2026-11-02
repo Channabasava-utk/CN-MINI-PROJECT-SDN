@@ -1,11 +1,15 @@
+# Python environments and caches
 .venv/
 venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .coverage
+
+# Local secrets and generated runtime data
 .env
 users.json
+**/users.json
 data/auth_log.json
 data/access_results.json
 *.log
