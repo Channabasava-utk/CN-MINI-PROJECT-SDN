@@ -1,0 +1,39 @@
+{
+  "default_policy": "deny",
+  "roles": {
+    "user": {
+      "services": [
+        {
+          "ip": "10.0.0.5",
+          "port": 8000,
+          "protocol": "TCP"
+        }
+      ]
+    },
+    "admin": {
+      "services": [
+        {
+          "ip": "10.0.0.5",
+          "port": 8000,
+          "protocol": "TCP"
+        },
+        {
+          "ip": "10.0.0.6",
+          "port": 8001,
+          "protocol": "TCP"
+        }
+      ]
+    }
+  },
+  "security": {
+    "max_failed_attempts": 3,
+    "block_duration": 60,
+    "default_session_ttl": 60,
+    "max_session_ttl": 300
+  },
+  "monitoring": {
+    "stats_interval": 2,
+    "scan_threshold": 20,
+    "scan_window": 10
+  }
+}
