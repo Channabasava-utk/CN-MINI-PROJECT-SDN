@@ -14,9 +14,8 @@ from ryu.lib import hub
 from ryu.lib.packet import packet, ethernet, ipv4, tcp
 from webob import Response
 
-from sdn.session_manager import SessionManager
-from sdn.event_logger import EventLogger
-
+from .session_manager import SessionManager
+from .event_logger import EventLogger
 
 AUTH_SERVER = "10.0.0.4"
 WEB_SERVER = "10.0.0.5"
@@ -133,6 +132,23 @@ class AccessControlController(app_manager.RyuApp):
             self.add_flow(datapath, 20, request, normal)
             self.add_flow(datapath, 20, reply, normal)
 
+        # Allow only the authentication server to access the controller REST API.
+        controller_ip = "10.0.0.254"
+
+        api_request = parser.OFPMatch(
+            eth_type=0x0800, ip_proto=6,
+            ipv4_src=AUTH_SERVER, ipv4_dst=controller_ip,
+            tcp_dst=8080
+        )
+        api_reply = parser.OFPMatch(
+            eth_type=0x0800, ip_proto=6,
+            ipv4_src=controller_ip, ipv4_dst=AUTH_SERVER,
+            tcp_src=8080
+        )
+
+        self.add_flow(datapath, 20, api_request, normal)
+        self.add_flow(datapath, 20, api_reply, normal)
+
         if self.mode == "static":
             self.install_static_rules(datapath)
 
@@ -225,6 +241,15 @@ class AccessControlController(app_manager.RyuApp):
             raise ValueError("TTL must be between 1 and 300 seconds")
         if ip in self.blocked:
             raise ValueError("Client is currently blocked")
+
+        # Ensure all three topology switches are connected.
+        required_switches = {1, 2, 3}
+        connected_switches = set(self.datapaths.keys())
+
+        if not required_switches.issubset(connected_switches):
+            raise RuntimeError(
+                "Not all required switches are connected"
+            )
 
         self.remove_ip_flows(ip)
 

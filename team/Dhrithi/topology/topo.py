@@ -21,6 +21,13 @@ class AuthenticationTopo(Topo):
         h5 = self.addHost('h5', ip='10.0.0.5/24')
         h6 = self.addHost('h6', ip='10.0.0.6/24')
 
+        # Connect the Ubuntu host namespace to the Mininet network.
+        cHost = self.addHost(
+            'cHost',
+            ip='10.0.0.254/24',
+            inNamespace=False
+        )
+
         for host in [h1, h2, h3]:
             self.addLink(host, s1, cls=TCLink, bw=10, delay='5ms')
 
@@ -30,12 +37,14 @@ class AuthenticationTopo(Topo):
         for host in [h4, h5, h6]:
             self.addLink(host, s3, cls=TCLink, bw=10, delay='5ms')
 
+        self.addLink(cHost, s3)
+
 
 def run():
     net = Mininet(
         topo=AuthenticationTopo(),
         controller=None,
-        switch=OVSSwitch,
+        switch=lambda name, **params: OVSSwitch(name, protocols='OpenFlow13', **params),
         link=TCLink,
         autoSetMacs=True
     )
@@ -49,8 +58,10 @@ def run():
 
     try:
         net.start()
-        print("*** Network is running. Entering Mininet CLI.")
+
+        print("*** Network is running with OpenFlow 1.3.")
         CLI(net)
+
     finally:
         net.stop()
 

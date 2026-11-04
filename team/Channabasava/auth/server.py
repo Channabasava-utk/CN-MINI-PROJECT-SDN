@@ -522,8 +522,7 @@ def handle_client(conn, address):
 
         if (
             len(raw_message) > config.MAX_MESSAGE_SIZE
-            or not raw_message.endswith(b"
-")
+            or not raw_message.endswith(b"\n")
         ):
             response = {
                 "type": "ERROR",
@@ -550,8 +549,7 @@ def handle_client(conn, address):
                 }
 
         conn.sendall(
-            (json.dumps(response) + "
-").encode("utf-8")
+            (json.dumps(response) + "\n").encode("utf-8")
         )
 
     except socket.timeout:

@@ -13,3 +13,6 @@ users.json
 data/auth_log.json
 data/access_results.json
 *.log
+
+# Generated controller runtime data
+data/controller_log.json
