@@ -56,7 +56,8 @@ class AccessControlController(app_manager.RyuApp):
         self.blocked = {}
         self.mode = "dynamic"
         self.scan_attempts = defaultdict(deque)
-
+        self.pending_barriers = {}
+        self.pending_flow_errors = {}
         kwargs["wsgi"].register(
             AccessControlAPI, {REST_INSTANCE: self}
         )
@@ -230,6 +231,48 @@ class AccessControlController(app_manager.RyuApp):
         self.log_event("MODE_CHANGED", details={"mode": mode})
         return {"mode": self.mode, "message": "Mode changed"}
 
+    def send_flow_batch(self, datapath, flow_mods, timeout=5):
+        waiter = hub.Event()
+        error_state = {"error": None}
+        error_keys = []
+
+        for mod in flow_mods:
+            datapath.set_xid(mod)
+            key = (datapath.id, mod.xid)
+            self.pending_flow_errors[key] = error_state
+            error_keys.append(key)
+
+        parser = datapath.ofproto_parser
+        barrier = parser.OFPBarrierRequest(datapath)
+        datapath.set_xid(barrier)
+        barrier_key = (datapath.id, barrier.xid)
+        self.pending_barriers[barrier_key] = waiter
+
+        try:
+            for mod in flow_mods:
+                datapath.send_msg(mod)
+
+            datapath.send_msg(barrier)
+            waiter.wait(timeout)
+
+            if not waiter.is_set():
+                raise RuntimeError(
+                    "Timed out waiting for switch {} confirmation".format(
+                        datapath.id
+                    )
+                )
+
+            if error_state["error"]:
+                raise RuntimeError(
+                    "Switch {} rejected a flow: {}".format(
+                        datapath.id, error_state["error"]
+                    )
+                )
+        finally:
+            self.pending_barriers.pop(barrier_key, None)
+            for key in error_keys:
+                self.pending_flow_errors.pop(key, None)
+
     def install_session(self, ip, role, ttl):
         if self.mode != "dynamic":
             raise ValueError("Session grants require dynamic mode")
@@ -242,49 +285,70 @@ class AccessControlController(app_manager.RyuApp):
         if ip in self.blocked:
             raise ValueError("Client is currently blocked")
 
-        # Ensure all three topology switches are connected.
         required_switches = {1, 2, 3}
-        connected_switches = set(self.datapaths.keys())
+        datapaths = dict(self.datapaths)
 
-        if not required_switches.issubset(connected_switches):
+        if not required_switches.issubset(datapaths.keys()):
             raise RuntimeError(
                 "Not all required switches are connected"
             )
-
-        self.remove_ip_flows(ip)
 
         services = [(WEB_SERVER, WEB_PORT)]
         if role == "admin":
             services.append((ADMIN_SERVER, ADMIN_PORT))
 
+        cookie = session_cookie(ip)
+        self.remove_ip_flows(ip)
+
+        try:
+            for switch_id in sorted(required_switches):
+                datapath = datapaths[switch_id]
+                parser = datapath.ofproto_parser
+                ofproto = datapath.ofproto
+                normal = [
+                    parser.OFPActionOutput(ofproto.OFPP_NORMAL)
+                ]
+                flow_mods = []
+
+                for server_ip, port in services:
+                    matches = [
+                        parser.OFPMatch(
+                            eth_type=0x0800, ip_proto=6,
+                            ipv4_src=ip, ipv4_dst=server_ip,
+                            tcp_dst=port
+                        ),
+                        parser.OFPMatch(
+                            eth_type=0x0800, ip_proto=6,
+                            ipv4_src=server_ip, ipv4_dst=ip,
+                            tcp_src=port
+                        )
+                    ]
+
+                    for match in matches:
+                        instructions = [
+                            parser.OFPInstructionActions(
+                                ofproto.OFPIT_APPLY_ACTIONS, normal
+                            )
+                        ]
+                        flow_mods.append(parser.OFPFlowMod(
+                            datapath=datapath,
+                            cookie=cookie,
+                            priority=30,
+                            match=match,
+                            instructions=instructions,
+                            hard_timeout=int(ttl)
+                        ))
+
+                self.send_flow_batch(datapath, flow_mods)
+
+        except Exception:
+            self.remove_ip_flows(ip)
+            self.session_manager.revoke_session(ip)
+            raise
+
         session = self.session_manager.create_session(
             ip, role, services, ttl
         )
-
-        cookie = session_cookie(ip)
-        for datapath in list(self.datapaths.values()):
-            parser = datapath.ofproto_parser
-            normal = [
-                parser.OFPActionOutput(datapath.ofproto.OFPP_NORMAL)
-            ]
-
-            for server_ip, port in services:
-                request = parser.OFPMatch(
-                    eth_type=0x0800, ip_proto=6,
-                    ipv4_src=ip, ipv4_dst=server_ip, tcp_dst=port
-                )
-                reply = parser.OFPMatch(
-                    eth_type=0x0800, ip_proto=6,
-                    ipv4_src=server_ip, ipv4_dst=ip, tcp_src=port
-                )
-                self.add_flow(
-                    datapath, 30, request, normal,
-                    hard_timeout=ttl, cookie=cookie
-                )
-                self.add_flow(
-                    datapath, 30, reply, normal,
-                    hard_timeout=ttl, cookie=cookie
-                )
 
         self.log_event("SESSION_GRANTED", ip, {
             "role": role, "ttl": ttl, "services": services
@@ -350,6 +414,28 @@ class AccessControlController(app_manager.RyuApp):
             })
             self.block(ip, BLOCK_DURATION, "Excessive connection attempts")
             attempts.clear()
+
+    @set_ev_cls(ofp_event.EventOFPErrorMsg, MAIN_DISPATCHER)
+    def flow_error_handler(self, ev):
+        msg = ev.msg
+        pending = self.pending_flow_errors.get(
+            (msg.datapath.id, msg.xid)
+        )
+        if pending is not None:
+            pending["error"] = (
+                "OpenFlow error type={}, code={}".format(
+                    msg.type, msg.code
+                )
+            )
+
+    @set_ev_cls(ofp_event.EventOFPBarrierReply, MAIN_DISPATCHER)
+    def barrier_reply_handler(self, ev):
+        msg = ev.msg
+        waiter = self.pending_barriers.get(
+            (msg.datapath.id, msg.xid)
+        )
+        if waiter is not None:
+            waiter.set()
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def packet_in_handler(self, ev):
