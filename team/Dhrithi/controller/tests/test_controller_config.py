@@ -81,7 +81,7 @@ class ControllerConfigurationTests(unittest.TestCase):
             self.assertEqual(entries[0]["ip"], "10.0.0.1")
             self.assertEqual(entries[0]["details"]["role"], "user")
             self.assertIn("timestamp", created)
-            self.assertTrue(log_path.read_bytes().endswith(b"\\n"))
+            self.assertTrue(log_path.read_bytes().endswith(bytes([10])))
 
 
 if __name__ == "__main__":
