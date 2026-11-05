@@ -1,18 +1,42 @@
+from pathlib import Path
 import json
 import os
-import time
 import threading
+import time
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_LOG_PATH = REPOSITORY_ROOT / "data" / "controller_log.json"
 
 
 class EventLogger:
-    def __init__(self, filepath="data/controller_log.json"):
-        self.filepath = filepath
-        self.lock = threading.Lock()
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    """Append controller events to the shared repository data directory."""
 
-        if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
-            with open(filepath, "w") as file:
-                json.dump([], file)
+    def __init__(self, filepath=None):
+        self.filepath = Path(filepath) if filepath else DEFAULT_LOG_PATH
+        self.filepath.parent.mkdir(parents=True, exist_ok=True)
+        self.lock = threading.Lock()
+
+        if not self.filepath.exists() or self.filepath.stat().st_size == 0:
+            self._write_entries([])
+
+    def _write_entries(self, entries):
+        temporary_file = self.filepath.with_name(self.filepath.name + ".tmp")
+        with temporary_file.open("w", encoding="utf-8") as file:
+            json.dump(entries, file, indent=4)
+            file.write("\\n")
+        os.replace(str(temporary_file), str(self.filepath))
+
+    def read_all(self):
+        with self.lock:
+            try:
+                with self.filepath.open("r", encoding="utf-8") as file:
+                    entries = json.load(file)
+            except FileNotFoundError:
+                return []
+            if not isinstance(entries, list):
+                raise ValueError("Controller log must contain a JSON list")
+            return entries
 
     def log(self, event, ip=None, details=None):
         entry = {
@@ -24,17 +48,14 @@ class EventLogger:
 
         with self.lock:
             try:
-                with open(self.filepath, "r") as file:
+                with self.filepath.open("r", encoding="utf-8") as file:
                     entries = json.load(file)
+                if not isinstance(entries, list):
+                    entries = []
             except (json.JSONDecodeError, FileNotFoundError):
                 entries = []
 
             entries.append(entry)
-
-            temporary_file = self.filepath + ".tmp"
-            with open(temporary_file, "w") as file:
-                json.dump(entries, file, indent=4)
-
-            os.replace(temporary_file, self.filepath)
+            self._write_entries(entries)
 
         return entry
