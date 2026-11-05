@@ -1,6 +1,7 @@
 import json
 import time
 import ipaddress
+from pathlib import Path
 from collections import defaultdict, deque
 
 from ryu.base import app_manager
@@ -14,18 +15,62 @@ from ryu.lib import hub
 from ryu.lib.packet import packet, ethernet, ipv4, tcp
 from webob import Response
 
+from . import config as controller_config
 from .session_manager import SessionManager
 from .event_logger import EventLogger
 
-AUTH_SERVER = "10.0.0.4"
-WEB_SERVER = "10.0.0.5"
-ADMIN_SERVER = "10.0.0.6"
+BASE_DIR = Path(__file__).resolve().parent
+POLICY_PATH = BASE_DIR / "policy.json"
 
-AUTH_PORT = 9000
-WEB_PORT = 8000
-ADMIN_PORT = 8001
+with POLICY_PATH.open("r", encoding="utf-8") as policy_file:
+    POLICY = json.load(policy_file)
 
-CLIENTS = {"10.0.0.1", "10.0.0.2", "10.0.0.3"}
+AUTH_SERVER = controller_config.HOSTS["h4"]["ip"]
+WEB_SERVER = controller_config.HOSTS["h5"]["ip"]
+ADMIN_SERVER = controller_config.HOSTS["h6"]["ip"]
+
+AUTH_PORT = controller_config.AUTH_PORT
+WEB_PORT = controller_config.WEB_PORT
+ADMIN_PORT = controller_config.ADMIN_PORT
+MANAGEMENT_IP = controller_config.MANAGEMENT_IP
+
+CLIENTS = {
+    controller_config.HOSTS[name]["ip"]
+    for name in ("h1", "h2", "h3")
+}
+REQUIRED_SWITCH_IDS = set(controller_config.SWITCH_IDS)
+
+ROLE_SERVICES = {
+    role: [
+        (service["ip"], int(service["port"]))
+        for service in definition["services"]
+        if service.get("protocol", "TCP").upper() == "TCP"
+    ]
+    for role, definition in POLICY["roles"].items()
+}
+if not {"user", "admin"}.issubset(ROLE_SERVICES):
+    raise RuntimeError("policy.json must define user and admin roles")
+
+MAX_SESSION_TTL = int(
+    POLICY.get("security", {}).get(
+        "max_session_ttl", controller_config.MAX_SESSION_TTL
+    )
+)
+SCAN_THRESHOLD = int(
+    POLICY.get("monitoring", {}).get(
+        "scan_threshold", controller_config.SCAN_THRESHOLD
+    )
+)
+SCAN_WINDOW = int(
+    POLICY.get("monitoring", {}).get(
+        "scan_window", controller_config.SCAN_WINDOW
+    )
+)
+BLOCK_DURATION = int(
+    POLICY.get("security", {}).get(
+        "block_duration", controller_config.BLOCK_DURATION
+    )
+)
 
 REST_INSTANCE = "access_control_api"
 
@@ -33,10 +78,7 @@ SESSION_COOKIE_BASE = 0x3000000000000000
 SESSION_COOKIE_MASK = 0xffffffffffffffff
 STATIC_COOKIE = 0x2000000000000000
 STATIC_COOKIE_MASK = 0xffffffffffffffff
-
-SCAN_THRESHOLD = 20
-SCAN_WINDOW = 10
-BLOCK_DURATION = 60
+BLOCK_COOKIE_BASE = 0x4000000000000000
 
 
 def session_cookie(ip):
@@ -133,18 +175,16 @@ class AccessControlController(app_manager.RyuApp):
             self.add_flow(datapath, 20, request, normal)
             self.add_flow(datapath, 20, reply, normal)
 
-        # Allow only the authentication server to access the controller REST API.
-        controller_ip = "10.0.0.254"
-
+        # Permit the authentication host to reach the REST API address.
         api_request = parser.OFPMatch(
             eth_type=0x0800, ip_proto=6,
-            ipv4_src=AUTH_SERVER, ipv4_dst=controller_ip,
-            tcp_dst=8080
+            ipv4_src=AUTH_SERVER, ipv4_dst=MANAGEMENT_IP,
+            tcp_dst=controller_config.REST_API_PORT
         )
         api_reply = parser.OFPMatch(
             eth_type=0x0800, ip_proto=6,
-            ipv4_src=controller_ip, ipv4_dst=AUTH_SERVER,
-            tcp_src=8080
+            ipv4_src=MANAGEMENT_IP, ipv4_dst=AUTH_SERVER,
+            tcp_src=controller_config.REST_API_PORT
         )
 
         self.add_flow(datapath, 20, api_request, normal)
@@ -167,10 +207,42 @@ class AccessControlController(app_manager.RyuApp):
             match=parser.OFPMatch()
         ))
 
-    def remove_ip_flows(self, ip):
+    def required_datapaths(self):
+        datapaths = dict(self.datapaths)
+        missing = REQUIRED_SWITCH_IDS.difference(datapaths)
+        if missing:
+            raise RuntimeError(
+                "Required switches are not connected: {}".format(
+                    sorted(missing)
+                )
+            )
+        return {switch_id: datapaths[switch_id]
+                for switch_id in sorted(REQUIRED_SWITCH_IDS)}
+
+    def cookie_delete_mod(self, datapath, cookie, mask):
+        parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+        return parser.OFPFlowMod(
+            datapath=datapath,
+            command=ofproto.OFPFC_DELETE,
+            cookie=cookie,
+            cookie_mask=mask,
+            out_port=ofproto.OFPP_ANY,
+            out_group=ofproto.OFPG_ANY,
+            match=parser.OFPMatch()
+        )
+
+    def remove_ip_flows(self, ip, confirm=False, datapaths=None):
         cookie = session_cookie(ip)
-        for datapath in list(self.datapaths.values()):
-            self.delete_cookie(datapath, cookie, SESSION_COOKIE_MASK)
+        targets = datapaths or dict(self.datapaths)
+        for datapath in targets.values():
+            delete_mod = self.cookie_delete_mod(
+                datapath, cookie, SESSION_COOKIE_MASK
+            )
+            if confirm:
+                self.send_flow_batch(datapath, [delete_mod])
+            else:
+                datapath.send_msg(delete_mod)
 
     def install_static_rules(self, datapath):
         parser = datapath.ofproto_parser
@@ -278,36 +350,31 @@ class AccessControlController(app_manager.RyuApp):
             raise ValueError("Session grants require dynamic mode")
         if ip not in CLIENTS:
             raise ValueError("Unknown client IP")
-        if role not in ("user", "admin"):
-            raise ValueError("Role must be user or admin")
-        if ttl <= 0 or ttl > 300:
-            raise ValueError("TTL must be between 1 and 300 seconds")
+        if role not in ROLE_SERVICES:
+            raise ValueError("Role is not defined in policy.json")
+        if not isinstance(ttl, int) or ttl <= 0 or ttl > MAX_SESSION_TTL:
+            raise ValueError(
+                "TTL must be between 1 and {} seconds".format(
+                    MAX_SESSION_TTL
+                )
+            )
         if ip in self.blocked:
             raise ValueError("Client is currently blocked")
 
-        required_switches = {1, 2, 3}
-        datapaths = dict(self.datapaths)
-
-        if not required_switches.issubset(datapaths.keys()):
-            raise RuntimeError(
-                "Not all required switches are connected"
-            )
-
-        services = [(WEB_SERVER, WEB_PORT)]
-        if role == "admin":
-            services.append((ADMIN_SERVER, ADMIN_PORT))
+        datapaths = self.required_datapaths()
+        services = ROLE_SERVICES[role]
+        if not services:
+            raise ValueError("Role has no TCP services in policy.json")
 
         cookie = session_cookie(ip)
-        self.remove_ip_flows(ip)
-
         try:
-            for switch_id in sorted(required_switches):
-                datapath = datapaths[switch_id]
+            # Remove stale rules and confirm deletion before replacing a session.
+            self.remove_ip_flows(ip, confirm=True, datapaths=datapaths)
+
+            for switch_id, datapath in datapaths.items():
                 parser = datapath.ofproto_parser
                 ofproto = datapath.ofproto
-                normal = [
-                    parser.OFPActionOutput(ofproto.OFPP_NORMAL)
-                ]
+                normal = [parser.OFPActionOutput(ofproto.OFPP_NORMAL)]
                 flow_mods = []
 
                 for server_ip, port in services:
@@ -323,7 +390,6 @@ class AccessControlController(app_manager.RyuApp):
                             tcp_src=port
                         )
                     ]
-
                     for match in matches:
                         instructions = [
                             parser.OFPInstructionActions(
@@ -342,18 +408,25 @@ class AccessControlController(app_manager.RyuApp):
                 self.send_flow_batch(datapath, flow_mods)
 
         except Exception:
-            self.remove_ip_flows(ip)
+            # Best-effort cleanup; do not create an authenticated session on failure.
+            try:
+                self.remove_ip_flows(
+                    ip, confirm=True, datapaths=datapaths
+                )
+            except Exception as cleanup_error:
+                self.logger.error(
+                    "Could not fully clean failed grant for %s: %s",
+                    ip, cleanup_error
+                )
             self.session_manager.revoke_session(ip)
             raise
 
         session = self.session_manager.create_session(
             ip, role, services, ttl
         )
-
         self.log_event("SESSION_GRANTED", ip, {
             "role": role, "ttl": ttl, "services": services
         })
-
         return {
             "action": "granted", "ip": ip, "role": role,
             "services": services, "expires_at": session["expires_at"]
@@ -363,40 +436,64 @@ class AccessControlController(app_manager.RyuApp):
         if ip not in CLIENTS:
             raise ValueError("Unknown client IP")
 
-        self.remove_ip_flows(ip)
+        datapaths = self.required_datapaths()
+        self.remove_ip_flows(ip, confirm=True, datapaths=datapaths)
         self.session_manager.revoke_session(ip)
         self.log_event("SESSION_REVOKED", ip)
-        return {"action": "revoked", "ip": ip}
+        return {"action": "revoked", "ip": ip, "switches_confirmed": sorted(datapaths)}
 
     def block(self, ip, duration, reason):
         if ip not in CLIENTS:
             raise ValueError("Unknown client IP")
-        if duration <= 0:
-            raise ValueError("Duration must be positive")
+        if not isinstance(duration, int) or duration <= 0:
+            raise ValueError("Block duration must be a positive integer")
 
-        self.remove_ip_flows(ip)
-        self.session_manager.revoke_session(ip)
-
+        datapaths = self.required_datapaths()
+        block_cookie = BLOCK_COOKIE_BASE | int(ipaddress.ip_address(ip))
+        # Mark blocked before installing rules so repeated probes do not race.
         self.blocked[ip] = {
             "until": time.time() + duration,
             "reason": reason
         }
+        self.session_manager.revoke_session(ip)
 
-        for datapath in list(self.datapaths.values()):
-            parser = datapath.ofproto_parser
-            match = parser.OFPMatch(
-                eth_type=0x0800, ipv4_src=ip
-            )
-            self.add_flow(
-                datapath, 50, match, [], hard_timeout=duration
-            )
+        try:
+            for switch_id, datapath in datapaths.items():
+                parser = datapath.ofproto_parser
+                ofproto = datapath.ofproto
+                drop_match = parser.OFPMatch(
+                    eth_type=0x0800, ipv4_src=ip
+                )
+                flow_mods = [
+                    self.cookie_delete_mod(
+                        datapath, session_cookie(ip), SESSION_COOKIE_MASK
+                    ),
+                    self.cookie_delete_mod(
+                        datapath, block_cookie, SESSION_COOKIE_MASK
+                    ),
+                    parser.OFPFlowMod(
+                        datapath=datapath,
+                        cookie=block_cookie,
+                        priority=50,
+                        match=drop_match,
+                        instructions=[],
+                        hard_timeout=int(duration)
+                    )
+                ]
+                self.send_flow_batch(datapath, flow_mods)
+        except Exception:
+            self.log_event("BLOCK_INSTALL_FAILED", ip, {
+                "duration": duration, "reason": reason
+            })
+            raise
 
         self.log_event("CLIENT_BLOCKED", ip, {
             "duration": duration, "reason": reason
         })
         return {
             "action": "blocked", "ip": ip,
-            "duration": duration, "reason": reason
+            "duration": duration, "reason": reason,
+            "switches_confirmed": sorted(datapaths)
         }
 
     def record_scan_attempt(self, ip):
@@ -567,8 +664,7 @@ class AccessControlAPI(ControllerBase):
     @route("logs", "/acl/log", methods=["GET"])
     def logs(self, req, **kwargs):
         try:
-            with open("data/controller_log.json", "r") as file:
-                return self.respond(json.load(file))
+            return self.respond(self.controller.event_logger.read_all())
         except Exception as error:
             return self.respond({"error": str(error)}, 500)
 
@@ -591,11 +687,13 @@ class AccessControlAPI(ControllerBase):
             "hosts": {
                 "h1": "10.0.0.1", "h2": "10.0.0.2",
                 "h3": "10.0.0.3", "h4": "10.0.0.4",
-                "h5": "10.0.0.5", "h6": "10.0.0.6"
+                "h5": WEB_SERVER, "h6": ADMIN_SERVER,
+                "cHost": MANAGEMENT_IP
             },
             "links": [
                 ["h1", "s1"], ["h2", "s1"], ["h3", "s1"],
                 ["s1", "s2"], ["s2", "s3"],
-                ["s3", "h4"], ["s3", "h5"], ["s3", "h6"]
+                ["s3", "h4"], ["s3", "h5"], ["s3", "h6"],
+                ["s3", "cHost"]
             ]
         })
