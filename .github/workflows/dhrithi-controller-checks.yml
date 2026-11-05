@@ -1,0 +1,34 @@
+name: Dhrithi Controller Checks
+
+on:
+  push:
+    branches:
+      - integration/fix-controller-auth-topology
+  pull_request:
+    paths:
+      - "team/Dhrithi/**"
+      - ".github/workflows/dhrithi-controller-checks.yml"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile controller and topology files
+        run: python -m compileall -q team/Dhrithi/controller team/Dhrithi/topology
+
+      - name: Run configuration and event-log tests
+        run: python -m unittest team.Dhrithi.controller.tests.test_controller_config -v
+
+      - name: Validate JSON files
+        run: |
+          python -m json.tool team/Dhrithi/controller/policy.json > /dev/null
+          python -m json.tool team/Dhrithi/topology/topology.json > /dev/null
+          python -m json.tool policy.json > /dev/null
