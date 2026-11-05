@@ -9,6 +9,9 @@ MANAGEMENT_IP = "10.0.0.254"
 REST_API_HOST = "0.0.0.0"
 REST_API_PORT = 8080
 
+# Keep below Channabasava's 2-second HTTP controller timeout.
+FLOW_CONFIRM_TIMEOUT = 1.0
+
 # Backward-compatible names used by the original topology setup.
 CONTROLLER_HOST = OPENFLOW_HOST
 CONTROLLER_PORT = OPENFLOW_PORT
