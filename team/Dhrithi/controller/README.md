@@ -1,61 +1,94 @@
 # Dhrithi — Ryu SDN Controller and Network Access Control
 
-
 ## Overview
-This module implements the Ryu SDN controller and network access control functionality for the SDN mini-project.
+
+This module provides the Ryu OpenFlow 1.3 controller, session flow management, client blocking, event logging, and REST endpoints used by Channabasava's authentication server.
 
 ## Files
-- controller.py: Main Ryu controller and REST API.
-- session_manager.py: Manages client access sessions and expiry.
-- event_logger.py: Records controller events.
-- faults.py: Provides network fault simulation functions.
-- __init__.py: Python package initialization.
-- config.py: Project configuration.
-- policy.json: Access control policy configuration.
 
-## Controller Startup
-The controller was developed and tested in the original SDN_Project workspace.
+- `controller.py`: Ryu application and REST API.
+- `session_manager.py`: In-memory authenticated session and expiry management.
+- `event_logger.py`: Shared JSON event log writer.
+- `faults.py`: Helpers for controlled Mininet link/interface fault tests.
+- `config.py`: Shared controller/topology constants.
+- `policy.json`: Role-to-service permissions and security/monitoring thresholds.
 
-From the original project root, run:
-1. source ryu-env/bin/activate
-2. PYTHONPATH="$PWD" ryu-manager --ofp-tcp-listen-port 6653 sdn.controller
+## Package startup
 
-OpenFlow connections use port 6653.
-The REST API listens on port 8080.
+Run from the repository root. Activate the Python environment that contains Ryu 4.34, then start:
 
-## REST API
+```bash
+source ryu-env/bin/activate
+PYTHONPATH="$PWD" ryu-manager \
+  --ofp-tcp-listen-port 6653 \
+  --wsapi-host 0.0.0.0 \
+  --wsapi-port 8080 \
+  team.Dhrithi.controller.controller
+```
+
+The Ryu application is imported using its repository package path. Do not use the old `sdn.controller` command; that package does not exist in this repository layout.
+
+Start the Mininet topology in a second terminal after Ryu is running:
+
+```bash
+sudo mn -c
+sudo python3 team/Dhrithi/topology/topo.py
+```
+
+## Network addresses
+
+- OpenFlow switch connection: `127.0.0.1:6653`.
+- Controller REST API: `0.0.0.0:8080` (listener).
+- Management address reached by h4: `10.0.0.254:8080`, supplied by the root-namespace `cHost` interface.
+- Authentication server: `10.0.0.4:9000`.
+- Web service: `10.0.0.5:8000`.
+- Admin service: `10.0.0.6:8001`.
+
+The REST API listener is bound to all host interfaces so it can be started before Mininet creates cHost. OpenFlow base rules permit the authentication server's management connection through the Mininet path. Do not expose the REST API to untrusted networks.
+
+## REST API contract
 
 | Method | Endpoint | Purpose |
-| POST | /acl/grant | Grant client access |
-| POST | /acl/revoke | Revoke client access |
-| POST | /acl/block | Block a client |
-| POST | /acl/mode | Change access mode |
-| GET | /acl/sessions | View active sessions |
-| GET | /acl/log | View event logs |
-| GET | /acl/stats | View controller statistics |
-| GET | /acl/topology | View network topology |
+|---|---|---|
+| POST | `/acl/grant` | Install role-specific access flows with a session TTL |
+| POST | `/acl/revoke` | Remove a client's session flows |
+| POST | `/acl/block` | Remove session flows and install a temporary source-IP drop |
+| POST | `/acl/mode` | Switch between static and dynamic access rules |
+| GET | `/acl/sessions` | List active controller sessions |
+| GET | `/acl/log` | Read controller events |
+| GET | `/acl/stats` | Read controller status |
+| GET | `/acl/topology` | Read the configured topology |
 
-## Example Requests
+Example request bodies:
 
-Grant access:
-{"ip":"10.0.0.1","role":"user","ttl":120}
+```json
+{"ip":"10.0.0.1","user":"alice","role":"user","ttl":60}
+{"ip":"10.0.0.1","reason":"logout"}
+{"ip":"10.0.0.3","duration":60,"reason":"bruteforce"}
+{"mode":"dynamic"}
+```
 
-Revoke access:
-{"ip":"10.0.0.1"}
+The authentication server checks the `action` field in successful responses. Grant, revoke, block, and mode changes wait for OpenFlow barrier replies from all three required switches before reporting success. A failed or timed-out switch update is returned as an API error.
 
-Block a client:
-{"ip":"10.0.0.3","duration":60,"reason":"Suspicious activity"}
+## Policy and logs
 
-Change access mode:
-{"mode":"static"}
+Role permissions and security thresholds are read from this folder's `policy.json`; network addresses and ports come from `config.py`. Do not edit the root `policy.json` for the Ryu role-service schema.
 
-## Dependencies
-- Python
-- Ryu 4.34
-- Mininet
-- Open vSwitch
+Controller events are stored in the shared repository path `data/controller_log.json`, independent of the current working directory.
 
-The controller uses OpenFlow 1.3.
+## Verification
 
-## Integration Notes
-Authentication server integration and management API restrictions require coordination with the authentication module.
+After Ryu and Mininet are running, use:
+
+```bash
+curl -s http://10.0.0.254:8080/acl/stats
+curl -s http://10.0.0.254:8080/acl/topology
+```
+
+From the Mininet CLI, verify the API path from h4:
+
+```text
+mininet> h4 curl -s http://10.0.0.254:8080/acl/stats
+```
+
+Then run the project's authentication tests through h1/h2 and verify the expected WEB/ADMIN access behavior. The source files and API responses alone do not replace an end-to-end test with the authentication service and Mininet.
