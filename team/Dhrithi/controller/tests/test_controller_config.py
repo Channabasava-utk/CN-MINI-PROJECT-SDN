@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from team.Dhrithi.controller import config
+import config as auth_config
 from team.Dhrithi.controller.event_logger import EventLogger
 
 
@@ -61,6 +62,12 @@ class ControllerConfigurationTests(unittest.TestCase):
         self.assertEqual(
             shared_policy["roles"]["admin"]["services"],
             ["web", "admin"]
+        )
+
+    def test_flow_confirmation_fits_auth_server_timeout(self):
+        self.assertLess(
+            config.FLOW_CONFIRM_TIMEOUT,
+            auth_config.CONTROLLER_TIMEOUT
         )
 
     def test_topology_metadata_matches_shared_config(self):
