@@ -52,6 +52,17 @@ class ControllerConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(policy["default_policy"], "deny")
 
+        shared_policy = json.loads(
+            (ROOT / "policy.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            shared_policy["roles"]["user"]["services"], ["web"]
+        )
+        self.assertEqual(
+            shared_policy["roles"]["admin"]["services"],
+            ["web", "admin"]
+        )
+
     def test_topology_metadata_matches_shared_config(self):
         topology_path = ROOT / "team/Dhrithi/topology/topology.json"
         topology = json.loads(topology_path.read_text(encoding="utf-8"))
