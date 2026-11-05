@@ -235,14 +235,17 @@ class AccessControlController(app_manager.RyuApp):
     def remove_ip_flows(self, ip, confirm=False, datapaths=None):
         cookie = session_cookie(ip)
         targets = datapaths or dict(self.datapaths)
+        batches = {}
         for datapath in targets.values():
             delete_mod = self.cookie_delete_mod(
                 datapath, cookie, SESSION_COOKIE_MASK
             )
             if confirm:
-                self.send_flow_batch(datapath, [delete_mod])
+                batches[datapath.id] = (datapath, [delete_mod])
             else:
                 datapath.send_msg(delete_mod)
+        if confirm and batches:
+            self.send_flow_batches(batches)
 
     def static_flow_mods(self, datapath):
         parser = datapath.ofproto_parser
@@ -298,7 +301,8 @@ class AccessControlController(app_manager.RyuApp):
 
         datapaths = self.required_datapaths()
         try:
-            for datapath in datapaths.values():
+            batches = {}
+            for switch_id, datapath in datapaths.items():
                 flow_mods = [
                     self.cookie_delete_mod(
                         datapath, STATIC_COOKIE, STATIC_COOKIE_MASK
@@ -310,25 +314,25 @@ class AccessControlController(app_manager.RyuApp):
                 ]
                 if mode == "static":
                     flow_mods.extend(self.static_flow_mods(datapath))
-                self.send_flow_batch(datapath, flow_mods)
+                batches[switch_id] = (datapath, flow_mods)
+            self.send_flow_batches(batches)
         except Exception:
             # A failed mode transition must not leave stale allow rules behind.
-            for datapath in datapaths.values():
-                try:
-                    self.send_flow_batch(datapath, [
-                        self.cookie_delete_mod(
-                            datapath, STATIC_COOKIE, STATIC_COOKIE_MASK
-                        ),
-                        self.cookie_delete_mod(
-                            datapath, SESSION_COOKIE_BASE,
-                            0xf000000000000000
-                        )
-                    ])
-                except Exception as cleanup_error:
-                    self.logger.error(
-                        "Mode rollback failed on switch %s: %s",
-                        datapath.id, cleanup_error
+            rollback_batches = {}
+            for switch_id, datapath in datapaths.items():
+                rollback_batches[switch_id] = (datapath, [
+                    self.cookie_delete_mod(
+                        datapath, STATIC_COOKIE, STATIC_COOKIE_MASK
+                    ),
+                    self.cookie_delete_mod(
+                        datapath, SESSION_COOKIE_BASE,
+                        0xf000000000000000
                     )
+                ])
+            try:
+                self.send_flow_batches(rollback_batches)
+            except Exception as cleanup_error:
+                self.logger.error("Mode rollback failed: %s", cleanup_error)
             for ip in list(self.session_manager.get_active_sessions()):
                 self.session_manager.revoke_session(ip)
             self.mode = "dynamic"
@@ -345,45 +349,73 @@ class AccessControlController(app_manager.RyuApp):
             "switches_confirmed": sorted(datapaths)
         }
 
-    def send_flow_batch(self, datapath, flow_mods, timeout=5):
-        waiter = hub.Event()
-        error_state = {"error": None}
+    def send_flow_batch(self, datapath, flow_mods, timeout=None):
+        self.send_flow_batches(
+            {datapath.id: (datapath, flow_mods)}, timeout=timeout
+        )
+
+    def send_flow_batches(self, batches, timeout=None):
+        """Confirm changes on all switches under one shared deadline."""
+        if not batches:
+            return
+
+        timeout = (
+            controller_config.FLOW_CONFIRM_TIMEOUT
+            if timeout is None else timeout
+        )
+        pending = []
         error_keys = []
 
-        for mod in flow_mods:
-            datapath.set_xid(mod)
-            key = (datapath.id, mod.xid)
-            self.pending_flow_errors[key] = error_state
-            error_keys.append(key)
+        for switch_id, (datapath, flow_mods) in batches.items():
+            waiter = hub.Event()
+            error_state = {"error": None}
+            for mod in flow_mods:
+                datapath.set_xid(mod)
+                key = (datapath.id, mod.xid)
+                self.pending_flow_errors[key] = error_state
+                error_keys.append(key)
 
-        parser = datapath.ofproto_parser
-        barrier = parser.OFPBarrierRequest(datapath)
-        datapath.set_xid(barrier)
-        barrier_key = (datapath.id, barrier.xid)
-        self.pending_barriers[barrier_key] = waiter
+            barrier = datapath.ofproto_parser.OFPBarrierRequest(datapath)
+            datapath.set_xid(barrier)
+            barrier_key = (datapath.id, barrier.xid)
+            self.pending_barriers[barrier_key] = waiter
+            pending.append({
+                "switch_id": switch_id,
+                "datapath": datapath,
+                "flow_mods": flow_mods,
+                "barrier": barrier,
+                "barrier_key": barrier_key,
+                "waiter": waiter,
+                "error_state": error_state
+            })
 
         try:
-            for mod in flow_mods:
-                datapath.send_msg(mod)
+            # Send every switch's changes before waiting for any barrier reply.
+            for item in pending:
+                for mod in item["flow_mods"]:
+                    item["datapath"].send_msg(mod)
+            for item in pending:
+                item["datapath"].send_msg(item["barrier"])
 
-            datapath.send_msg(barrier)
-            waiter.wait(timeout)
-
-            if not waiter.is_set():
-                raise RuntimeError(
-                    "Timed out waiting for switch {} confirmation".format(
-                        datapath.id
+            deadline = time.time() + timeout
+            for item in pending:
+                remaining = max(0, deadline - time.time())
+                item["waiter"].wait(remaining)
+                if not item["waiter"].is_set():
+                    raise RuntimeError(
+                        "Timed out waiting for switch {} confirmation".format(
+                            item["switch_id"]
+                        )
                     )
-                )
-
-            if error_state["error"]:
-                raise RuntimeError(
-                    "Switch {} rejected a flow: {}".format(
-                        datapath.id, error_state["error"]
+                if item["error_state"]["error"]:
+                    raise RuntimeError(
+                        "Switch {} rejected a flow: {}".format(
+                            item["switch_id"], item["error_state"]["error"]
+                        )
                     )
-                )
         finally:
-            self.pending_barriers.pop(barrier_key, None)
+            for item in pending:
+                self.pending_barriers.pop(item["barrier_key"], None)
             for key in error_keys:
                 self.pending_flow_errors.pop(key, None)
 
@@ -413,6 +445,7 @@ class AccessControlController(app_manager.RyuApp):
             # Remove stale rules and confirm deletion before replacing a session.
             self.remove_ip_flows(ip, confirm=True, datapaths=datapaths)
 
+            install_batches = {}
             for switch_id, datapath in datapaths.items():
                 parser = datapath.ofproto_parser
                 ofproto = datapath.ofproto
@@ -446,8 +479,9 @@ class AccessControlController(app_manager.RyuApp):
                             instructions=instructions,
                             hard_timeout=int(ttl)
                         ))
+                install_batches[switch_id] = (datapath, flow_mods)
 
-                self.send_flow_batch(datapath, flow_mods)
+            self.send_flow_batches(install_batches)
 
         except Exception:
             # Best-effort cleanup; do not create an authenticated session on failure.
@@ -500,9 +534,9 @@ class AccessControlController(app_manager.RyuApp):
         self.session_manager.revoke_session(ip)
 
         try:
+            block_batches = {}
             for switch_id, datapath in datapaths.items():
                 parser = datapath.ofproto_parser
-                ofproto = datapath.ofproto
                 drop_match = parser.OFPMatch(
                     eth_type=0x0800, ipv4_src=ip
                 )
@@ -522,7 +556,8 @@ class AccessControlController(app_manager.RyuApp):
                         hard_timeout=int(duration)
                     )
                 ]
-                self.send_flow_batch(datapath, flow_mods)
+                block_batches[switch_id] = (datapath, flow_mods)
+            self.send_flow_batches(block_batches)
         except Exception:
             self.log_event("BLOCK_INSTALL_FAILED", ip, {
                 "duration": duration, "reason": reason
