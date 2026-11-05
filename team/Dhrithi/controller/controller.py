@@ -244,10 +244,11 @@ class AccessControlController(app_manager.RyuApp):
             else:
                 datapath.send_msg(delete_mod)
 
-    def install_static_rules(self, datapath):
+    def static_flow_mods(self, datapath):
         parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
         normal = [
-            parser.OFPActionOutput(datapath.ofproto.OFPP_NORMAL)
+            parser.OFPActionOutput(ofproto.OFPP_NORMAL)
         ]
 
         # Static baseline: h1 can access web; h2 can access web and admin.
@@ -256,52 +257,93 @@ class AccessControlController(app_manager.RyuApp):
             ("10.0.0.2", WEB_SERVER, WEB_PORT),
             ("10.0.0.2", ADMIN_SERVER, ADMIN_PORT)
         ]
-
+        flow_mods = []
         for client_ip, server_ip, port in rules:
-            request = parser.OFPMatch(
-                eth_type=0x0800, ip_proto=6,
-                ipv4_src=client_ip, ipv4_dst=server_ip,
-                tcp_dst=port
-            )
-            reply = parser.OFPMatch(
-                eth_type=0x0800, ip_proto=6,
-                ipv4_src=server_ip, ipv4_dst=client_ip,
-                tcp_src=port
-            )
-            self.add_flow(
-                datapath, 30, request, normal, cookie=STATIC_COOKIE
-            )
-            self.add_flow(
-                datapath, 30, reply, normal, cookie=STATIC_COOKIE
-            )
+            matches = [
+                parser.OFPMatch(
+                    eth_type=0x0800, ip_proto=6,
+                    ipv4_src=client_ip, ipv4_dst=server_ip,
+                    tcp_dst=port
+                ),
+                parser.OFPMatch(
+                    eth_type=0x0800, ip_proto=6,
+                    ipv4_src=server_ip, ipv4_dst=client_ip,
+                    tcp_src=port
+                )
+            ]
+            for match in matches:
+                instructions = [
+                    parser.OFPInstructionActions(
+                        ofproto.OFPIT_APPLY_ACTIONS, normal
+                    )
+                ]
+                flow_mods.append(parser.OFPFlowMod(
+                    datapath=datapath,
+                    cookie=STATIC_COOKIE,
+                    priority=30,
+                    match=match,
+                    instructions=instructions
+                ))
+        return flow_mods
+
+    def install_static_rules(self, datapath):
+        for flow_mod in self.static_flow_mods(datapath):
+            datapath.send_msg(flow_mod)
 
     def set_mode(self, mode):
         if mode not in ("static", "dynamic"):
             raise ValueError("Mode must be static or dynamic")
-
         if mode == self.mode:
             return {"mode": self.mode, "message": "Already active"}
 
-        for datapath in list(self.datapaths.values()):
-            self.delete_cookie(
-                datapath, STATIC_COOKIE, STATIC_COOKIE_MASK
-            )
-            self.delete_cookie(
-                datapath, SESSION_COOKIE_BASE, 0xf000000000000000
-            )
+        datapaths = self.required_datapaths()
+        try:
+            for datapath in datapaths.values():
+                flow_mods = [
+                    self.cookie_delete_mod(
+                        datapath, STATIC_COOKIE, STATIC_COOKIE_MASK
+                    ),
+                    self.cookie_delete_mod(
+                        datapath, SESSION_COOKIE_BASE,
+                        0xf000000000000000
+                    )
+                ]
+                if mode == "static":
+                    flow_mods.extend(self.static_flow_mods(datapath))
+                self.send_flow_batch(datapath, flow_mods)
+        except Exception:
+            # A failed mode transition must not leave stale allow rules behind.
+            for datapath in datapaths.values():
+                try:
+                    self.send_flow_batch(datapath, [
+                        self.cookie_delete_mod(
+                            datapath, STATIC_COOKIE, STATIC_COOKIE_MASK
+                        ),
+                        self.cookie_delete_mod(
+                            datapath, SESSION_COOKIE_BASE,
+                            0xf000000000000000
+                        )
+                    ])
+                except Exception as cleanup_error:
+                    self.logger.error(
+                        "Mode rollback failed on switch %s: %s",
+                        datapath.id, cleanup_error
+                    )
+            for ip in list(self.session_manager.get_active_sessions()):
+                self.session_manager.revoke_session(ip)
+            self.mode = "dynamic"
+            self.log_event("MODE_CHANGE_FAILED", details={"requested": mode})
+            raise
 
-        # Clear dynamic sessions when changing access policy.
         for ip in list(self.session_manager.get_active_sessions()):
             self.session_manager.revoke_session(ip)
-
         self.mode = mode
-
-        if mode == "static":
-            for datapath in list(self.datapaths.values()):
-                self.install_static_rules(datapath)
-
         self.log_event("MODE_CHANGED", details={"mode": mode})
-        return {"mode": self.mode, "message": "Mode changed"}
+        return {
+            "mode": self.mode,
+            "message": "Mode changed",
+            "switches_confirmed": sorted(datapaths)
+        }
 
     def send_flow_batch(self, datapath, flow_mods, timeout=5):
         waiter = hub.Event()
