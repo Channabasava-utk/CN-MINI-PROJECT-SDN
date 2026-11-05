@@ -52,13 +52,16 @@ class AuthenticationTopo(Topo):
         self.addLink(management_host, s3)
 
 
+def make_openflow13_switch(name, **params):
+    params.setdefault("protocols", "OpenFlow13")
+    return OVSSwitch(name, **params)
+
+
 def run():
     net = Mininet(
         topo=AuthenticationTopo(),
         controller=None,
-        switch=lambda name, **params: OVSSwitch(
-            name, protocols="OpenFlow13", **params
-        ),
+        switch=make_openflow13_switch,
         link=TCLink,
         autoSetMacs=True
     )
