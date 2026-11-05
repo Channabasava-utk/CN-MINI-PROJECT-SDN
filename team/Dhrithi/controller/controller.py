@@ -551,7 +551,16 @@ class AccessControlController(app_manager.RyuApp):
                 "attempts": len(attempts),
                 "window_seconds": SCAN_WINDOW
             })
-            self.block(ip, BLOCK_DURATION, "Excessive connection attempts")
+            try:
+                self.block(
+                    ip, BLOCK_DURATION, "Excessive connection attempts"
+                )
+            except Exception as error:
+                # Keep the event loop alive; the REST/auth path will surface
+                # a failed block operation instead of claiming success.
+                self.log_event("BLOCK_INSTALL_FAILED", ip, {
+                    "reason": "scan_threshold", "error": str(error)
+                })
             attempts.clear()
 
     @set_ev_cls(ofp_event.EventOFPErrorMsg, MAIN_DISPATCHER)
