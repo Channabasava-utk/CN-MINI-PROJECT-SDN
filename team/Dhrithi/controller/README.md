@@ -92,3 +92,13 @@ mininet> h4 curl -s http://10.0.0.254:8080/acl/stats
 ```
 
 Then run the project's authentication tests through h1/h2 and verify the expected WEB/ADMIN access behavior. The source files and API responses alone do not replace an end-to-end test with the authentication service and Mininet.
+
+## Lightweight validation
+
+Run this from the repository root. These checks use only the Python standard library and do not import Ryu or Mininet:
+
+```bash
+python3 -m unittest team.Dhrithi.controller.tests.test_controller_config -v
+```
+
+The tests parse the controller/topology Python files, compare the Ryu policy with the shared authentication policy, verify the cHost/OpenFlow metadata, and check controller log read/write behavior.
