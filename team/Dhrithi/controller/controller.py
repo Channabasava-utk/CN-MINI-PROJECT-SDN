@@ -657,8 +657,27 @@ class AccessControlAPI(ControllerBase):
             status=status
         )
 
+    def authorize_management_access(self, req):
+        # The API listener binds before Mininet creates cHost, so restrict
+        # requests at the application layer as well as with OpenFlow rules.
+        remote_ip = req.remote_addr
+        trusted_sources = {
+            AUTH_SERVER, MANAGEMENT_IP, "127.0.0.1", "::1"
+        }
+        if remote_ip not in trusted_sources:
+            self.controller.log_event(
+                "REST_ACCESS_DENIED",
+                remote_ip,
+                {"path": req.path}
+            )
+            return self.respond({"error": "forbidden"}, 403)
+        return None
+
     @route("grant", "/acl/grant", methods=["POST"])
     def grant(self, req, **kwargs):
+        denied = self.authorize_management_access(req)
+        if denied is not None:
+            return denied
         try:
             body = req.json
             result = self.controller.install_session(
@@ -671,6 +690,9 @@ class AccessControlAPI(ControllerBase):
 
     @route("revoke", "/acl/revoke", methods=["POST"])
     def revoke(self, req, **kwargs):
+        denied = self.authorize_management_access(req)
+        if denied is not None:
+            return denied
         try:
             return self.respond(self.controller.revoke(req.json["ip"]))
         except Exception as error:
@@ -678,6 +700,9 @@ class AccessControlAPI(ControllerBase):
 
     @route("block", "/acl/block", methods=["POST"])
     def block(self, req, **kwargs):
+        denied = self.authorize_management_access(req)
+        if denied is not None:
+            return denied
         try:
             body = req.json
             result = self.controller.block(
@@ -690,6 +715,9 @@ class AccessControlAPI(ControllerBase):
 
     @route("mode", "/acl/mode", methods=["POST"])
     def mode(self, req, **kwargs):
+        denied = self.authorize_management_access(req)
+        if denied is not None:
+            return denied
         try:
             return self.respond(
                 self.controller.set_mode(req.json["mode"])
@@ -699,12 +727,18 @@ class AccessControlAPI(ControllerBase):
 
     @route("sessions", "/acl/sessions", methods=["GET"])
     def sessions(self, req, **kwargs):
+        denied = self.authorize_management_access(req)
+        if denied is not None:
+            return denied
         return self.respond(
             self.controller.session_manager.get_active_sessions()
         )
 
     @route("logs", "/acl/log", methods=["GET"])
     def logs(self, req, **kwargs):
+        denied = self.authorize_management_access(req)
+        if denied is not None:
+            return denied
         try:
             return self.respond(self.controller.event_logger.read_all())
         except Exception as error:
@@ -712,6 +746,9 @@ class AccessControlAPI(ControllerBase):
 
     @route("stats", "/acl/stats", methods=["GET"])
     def stats(self, req, **kwargs):
+        denied = self.authorize_management_access(req)
+        if denied is not None:
+            return denied
         active = self.controller.session_manager.get_active_sessions()
         return self.respond({
             "mode": self.controller.mode,
@@ -724,6 +761,9 @@ class AccessControlAPI(ControllerBase):
 
     @route("topology", "/acl/topology", methods=["GET"])
     def topology(self, req, **kwargs):
+        denied = self.authorize_management_access(req)
+        if denied is not None:
+            return denied
         return self.respond({
             "switches": ["s1", "s2", "s3"],
             "hosts": {
