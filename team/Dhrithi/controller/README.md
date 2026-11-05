@@ -44,7 +44,7 @@ sudo python3 team/Dhrithi/topology/topo.py
 - Web service: `10.0.0.5:8000`.
 - Admin service: `10.0.0.6:8001`.
 
-The REST API listener is bound to all host interfaces so it can be started before Mininet creates cHost. OpenFlow base rules permit the authentication server's management connection through the Mininet path. Do not expose the REST API to untrusted networks.
+The REST API listener is bound to all host interfaces so it can be started before Mininet creates cHost. Every REST route also checks the request source IP and permits only h4 (10.0.0.4), the local management address (10.0.0.254), and loopback. OpenFlow base rules permit the authentication server's management connection through the Mininet path. Do not expose the REST API to untrusted networks.
 
 ## REST API contract
 
@@ -68,7 +68,7 @@ Example request bodies:
 {"mode":"dynamic"}
 ```
 
-The authentication server checks the `action` field in successful responses. Grant, revoke, block, and mode changes wait for OpenFlow barrier replies from all three required switches before reporting success. A failed or timed-out switch update is returned as an API error.
+The authentication server checks the `action` field in successful responses. Grant, revoke, block, and mode changes send updates to all three required switches together and wait for their OpenFlow barrier replies under one shared 1-second deadline (`FLOW_CONFIRM_TIMEOUT`). This is shorter than the authentication server's 2-second HTTP timeout. A failed or timed-out switch update is returned as an API error.
 
 ## Policy and logs
 
