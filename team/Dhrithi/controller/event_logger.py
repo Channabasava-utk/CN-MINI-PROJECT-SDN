@@ -24,7 +24,7 @@ class EventLogger:
         temporary_file = self.filepath.with_name(self.filepath.name + ".tmp")
         with temporary_file.open("w", encoding="utf-8") as file:
             json.dump(entries, file, indent=4)
-            file.write("\\n")
+            file.write("\n")
         os.replace(str(temporary_file), str(self.filepath))
 
     def read_all(self):
