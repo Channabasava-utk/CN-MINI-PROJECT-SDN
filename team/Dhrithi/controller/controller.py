@@ -419,7 +419,7 @@ class AccessControlController(app_manager.RyuApp):
             for key in error_keys:
                 self.pending_flow_errors.pop(key, None)
 
-    def install_session(self, ip, role, ttl):
+    def install_session(self, ip, role, ttl,user=None):
         if self.mode != "dynamic":
             raise ValueError("Session grants require dynamic mode")
         if ip not in CLIENTS:
@@ -498,7 +498,7 @@ class AccessControlController(app_manager.RyuApp):
             raise
 
         session = self.session_manager.create_session(
-            ip, role, services, ttl
+            ip, role, services, ttl,user=user
         )
         self.log_event("SESSION_GRANTED", ip, {
             "role": role, "ttl": ttl, "services": services
@@ -508,14 +508,14 @@ class AccessControlController(app_manager.RyuApp):
             "services": services, "expires_at": session["expires_at"]
         }
 
-    def revoke(self, ip):
+    def revoke(self, ip, reason="revoked"):
         if ip not in CLIENTS:
             raise ValueError("Unknown client IP")
 
         datapaths = self.required_datapaths()
         self.remove_ip_flows(ip, confirm=True, datapaths=datapaths)
         self.session_manager.revoke_session(ip)
-        self.log_event("SESSION_REVOKED", ip)
+        self.log_event("SESSION_REVOKED", ip, {"reason": reason})
         return {"action": "revoked", "ip": ip, "switches_confirmed": sorted(datapaths)}
 
     def block(self, ip, duration, reason):
@@ -726,7 +726,8 @@ class AccessControlAPI(ControllerBase):
             body = req.json
             result = self.controller.install_session(
                 body["ip"], body["role"],
-                int(body.get("ttl", 60))
+                int(body.get("ttl", 60)),
+                user=body.get("user")
             )
             return self.respond(result)
         except Exception as error:
@@ -738,7 +739,11 @@ class AccessControlAPI(ControllerBase):
         if denied is not None:
             return denied
         try:
-            return self.respond(self.controller.revoke(req.json["ip"]))
+            body = req.json
+            result = self.controller.revoke(
+                body["ip"], body.get("reason", "revoked")
+            )
+            return self.respond(result)
         except Exception as error:
             return self.respond({"error": str(error)}, 400)
 
@@ -774,9 +779,40 @@ class AccessControlAPI(ControllerBase):
         denied = self.authorize_management_access(req)
         if denied is not None:
             return denied
-        return self.respond(
-            self.controller.session_manager.get_active_sessions()
-        )
+        active = self.controller.session_manager.get_active_sessions()
+
+        service_names = {
+            (service["ip"], int(service["port"])): service["name"]
+            for role in POLICY["roles"].values()
+            for service in role["services"]
+        }
+
+        sessions = [
+            {
+                **session,
+                "services": [
+                    service_names.get(
+                        tuple(service), f"{service[0]}:{service[1]}"
+                    )
+                    for service in session["services"]
+                ]
+            }
+            for session in active.values()
+        ]
+        blocked = [
+            {
+                "ip": ip,
+                "until": details["until"],
+                "reason": details["reason"]
+            }
+            for ip, details in self.controller.blocked.items()
+            if details["until"] > time.time()
+        ]
+
+        return self.respond({
+            "sessions": sessions,
+            "blocked": blocked
+        })
 
     @route("logs", "/acl/log", methods=["GET"])
     def logs(self, req, **kwargs):
@@ -784,7 +820,19 @@ class AccessControlAPI(ControllerBase):
         if denied is not None:
             return denied
         try:
-            return self.respond(self.controller.event_logger.read_all())
+            entries = self.controller.event_logger.read_all()
+            since = req.GET.get("since")
+
+            if since is not None:
+                since = float(since)
+                entries["events"] = [
+                    event for event in entries["events"]
+                    if event["ts"] > since
+                ]
+
+            return self.respond(entries)
+        except (ValueError, TypeError):
+            return self.respond({"error": "Invalid since timestamp"}, 400)
         except Exception as error:
             return self.respond({"error": str(error)}, 500)
 

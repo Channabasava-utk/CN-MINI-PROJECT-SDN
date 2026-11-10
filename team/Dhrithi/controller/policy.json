@@ -6,7 +6,8 @@
         {
           "ip": "10.0.0.5",
           "port": 8000,
-          "protocol": "TCP"
+          "protocol": "TCP",
+          "name": "web"
         }
       ]
     },
@@ -15,12 +16,14 @@
         {
           "ip": "10.0.0.5",
           "port": 8000,
-          "protocol": "TCP"
+          "protocol": "TCP",
+          "name": "web"
         },
         {
           "ip": "10.0.0.6",
           "port": 8001,
-          "protocol": "TCP"
+          "protocol": "TCP",
+          "name": "admin"
         }
       ]
     }

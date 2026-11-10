@@ -9,7 +9,7 @@ class SessionManager:
         self.sessions = {}
         self.lock = threading.RLock()
 
-    def create_session(self, ip, role, services, ttl=60):
+    def create_session(self, ip, role, services, ttl=60, user=None):
         if role not in ("user", "admin"):
             raise ValueError("Invalid role")
 
@@ -20,9 +20,10 @@ class SessionManager:
 
         session = {
             "ip": ip,
+            "user": user,
             "role": role,
             "services": services,
-            "created_at": now,
+            "granted_at": now,
             "expires_at": now + ttl
         }
 
@@ -34,9 +35,7 @@ class SessionManager:
     def get_session(self, ip):
         with self.lock:
             self.cleanup_expired()
-
             session = self.sessions.get(ip)
-
             return session.copy() if session else None
 
     def revoke_session(self, ip):
@@ -60,7 +59,6 @@ class SessionManager:
     def get_active_sessions(self):
         with self.lock:
             self.cleanup_expired()
-
             return {
                 ip: session.copy()
                 for ip, session in self.sessions.items()

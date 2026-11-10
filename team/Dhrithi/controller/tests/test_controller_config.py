@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 from team.Dhrithi.controller import config
 import config as auth_config
 from team.Dhrithi.controller.event_logger import EventLogger
+from team.Dhrithi.controller.session_manager import SessionManager
 
 
 class ControllerConfigurationTests(unittest.TestCase):
@@ -94,12 +95,53 @@ class ControllerConfigurationTests(unittest.TestCase):
             )
             entries = logger.read_all()
 
-            self.assertEqual(len(entries), 1)
-            self.assertEqual(entries[0]["event"], "SESSION_GRANTED")
-            self.assertEqual(entries[0]["ip"], "10.0.0.1")
-            self.assertEqual(entries[0]["details"]["role"], "user")
-            self.assertIn("timestamp", created)
+            self.assertEqual(len(entries["events"]), 1)
+            self.assertEqual(entries["events"][0]["action"], "GRANT")
+            self.assertEqual(entries["events"][0]["ip"], "10.0.0.1")
+            self.assertEqual(entries["events"][0]["reason"], "auth_ok")
+            self.assertIn("ts", created)
             self.assertTrue(log_path.read_bytes().endswith(bytes([10])))
+
+
+    def test_session_stores_username_and_grant_timestamp(self):
+        manager = SessionManager()
+        session = manager.create_session(
+            "10.0.0.1", "user", ["web"], ttl=60, user="alice"
+        )
+
+        self.assertEqual(session["user"], "alice")
+        self.assertEqual(session["ip"], "10.0.0.1")
+        self.assertIn("granted_at", session)
+        self.assertIn("expires_at", session)
+        self.assertNotIn("created_at", session)
+
+    def test_revoke_event_preserves_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logger = EventLogger(
+                Path(directory) / "controller_log.json"
+            )
+
+            logger.log(
+                "SESSION_REVOKED",
+                "10.0.0.1",
+                {"reason": "logout"}
+            )
+
+            event = logger.read_all()["events"][0]
+            self.assertEqual(event["action"], "REVOKE")
+            self.assertEqual(event["reason"], "logout")
+
+
+    def test_switch_events_are_not_written_to_shared_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logger = EventLogger(
+                Path(directory) / "controller_log.json"
+            )
+
+            logger.log("SWITCH_CONNECTED", details={"switch_id": 1})
+            logger.log("SWITCH_DISCONNECTED", details={"switch_id": 1})
+
+            self.assertEqual(logger.read_all()["events"], [])
 
 
 if __name__ == "__main__":
