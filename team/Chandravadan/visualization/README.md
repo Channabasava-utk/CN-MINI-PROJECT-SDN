@@ -1,7 +1,22 @@
-# Chandravadan — Monitoring and Visualization
+# Monitoring and Visualization Dashboard
 
-Upload graphing, monitoring, and visualization code in this folder.
+This module provides a browser-based dashboard for viewing SDN authentication and controller log analysis.
 
-Document how to run the visualizations, which inputs they require, and how the outputs relate to the analysis module.
+## Files
+- `dashboard.html` — dashboard interface.
+- `data/analysis_report.json` — generated analysis data used by the dashboard.
 
-This README is a placeholder until the visualization implementation is uploaded.
+## Generate the report
+From the repository root:
+
+```bash
+python3 team/Chandravadan/analysis/analyze_logs.py
+
+```
+
+## View the dashboard
+
+From the repository root, start a local web server:
+
+```bash
+python3 -m http.server 8088

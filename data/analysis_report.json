@@ -1,0 +1,36 @@
+{
+    "generated_at": "2026-11-16T03:09:49.566528+00:00",
+    "correlation_window_seconds": 5.0,
+    "total_authentication_events": 69,
+    "total_controller_events": 73,
+    "authentication_event_counts": {
+        "AUTH_FAIL": 17,
+        "AUTH_OK": 23,
+        "BLOCK_REQUEST": 5,
+        "ERROR": 2,
+        "EXPIRED": 19,
+        "LOGOUT": 3
+    },
+    "controller_action_counts": {
+        "BLOCK": 5,
+        "GRANT": 25,
+        "REVOKE": 38,
+        "UNBLOCK": 5
+    },
+    "correlation": {
+        "matched_event_pairs": 50,
+        "unmatched_authentication_events": 19,
+        "matched_pair_counts": {
+            "AUTH_FAIL -> BLOCK": 5,
+            "AUTH_OK -> GRANT": 23,
+            "EXPIRED -> REVOKE": 19,
+            "LOGOUT -> REVOKE": 3
+        }
+    },
+    "network_metrics": {
+        "available_installation_time_samples": 0,
+        "average_installation_time_ms": null,
+        "available_flow_change_samples": 0,
+        "total_flows_changed": null
+    }
+}

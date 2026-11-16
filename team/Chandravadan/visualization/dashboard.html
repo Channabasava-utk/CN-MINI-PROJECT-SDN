@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SDN Network Monitoring Dashboard</title>
+<style>
+body {
+    font-family: Arial, sans-serif;
+    margin: 0;
+    padding: 24px;
+    background: #f3f5f9;
+    color: #202938;
+}
+h1 { margin-bottom: 6px; }
+.subtitle { color: #64748b; margin-bottom: 24px; }
+.cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+}
+.card, section {
+    background: white;
+    padding: 20px;
+    border-radius: 10px;
+    box-shadow: 0 2px 8px #0000000d;
+    margin-bottom: 18px;
+}
+.metric { font-size: 30px; font-weight: bold; margin-top: 8px; }
+section { margin-top: 20px; }
+.bar-row {
+    display: grid;
+    grid-template-columns: 130px 1fr 35px;
+    gap: 10px;
+    align-items: center;
+    margin: 12px 0;
+}
+.track {
+    height: 13px;
+    background: #e8edf4;
+    border-radius: 10px;
+    overflow: hidden;
+}
+.bar {
+    height: 100%;
+    background: #3976c6;
+}
+table { width: 100%; border-collapse: collapse; }
+th, td {
+    padding: 10px;
+    border-bottom: 1px solid #e5eaf0;
+    text-align: left;
+}
+.status { color: #64748b; margin-top: 18px; }
+@media(max-width: 500px) {
+    body { padding: 14px; }
+    .bar-row { grid-template-columns: 95px 1fr 25px; }
+}
+</style>
+</head>
+<body>
+<h1>SDN Network Monitoring</h1>
+<p class="subtitle">Authentication, access control and event correlation</p>
+
+<div class="cards">
+    <div class="card">
+        Total authentication events
+        <div class="metric" id="authTotal">—</div>
+    </div>
+    <div class="card">
+        Total controller events
+        <div class="metric" id="controllerTotal">—</div>
+    </div>
+    <div class="card">
+        Correlated event pairs
+        <div class="metric" id="matchedTotal">—</div>
+    </div>
+    <div class="card">
+        Unmatched authentication events
+        <div class="metric" id="unmatchedTotal">—</div>
+    </div>
+</div>
+
+<section>
+<h2>Authentication Events</h2>
+<div id="authChart">Loading...</div>
+</section>
+
+<section>
+<h2>Controller Actions</h2>
+<div id="controllerChart">Loading...</div>
+</section>
+
+<section>
+<h2>Event Correlation</h2>
+<div id="correlationTable">Loading...</div>
+</section>
+
+<section>
+<h2>Network Metrics</h2>
+<div id="networkMetrics">Loading...</div>
+</section>
+
+<p class="status" id="status">Loading analysis report...</p>
+
+<script>
+function showCounts(elementId, counts) {
+    const container = document.getElementById(elementId);
+    container.replaceChildren();
+
+    const entries = Object.entries(counts || {});
+    if (!entries.length) {
+        container.textContent = "No event data available.";
+        return;
+    }
+
+    const maximum = Math.max(...entries.map(item => item[1]), 1);
+
+    entries.forEach(([name, count]) => {
+        const row = document.createElement("div");
+        row.className = "bar-row";
+
+        const label = document.createElement("span");
+        label.textContent = name;
+
+        const track = document.createElement("div");
+        track.className = "track";
+
+        const bar = document.createElement("div");
+        bar.className = "bar";
+        bar.style.width = (count / maximum * 100) + "%";
+        track.appendChild(bar);
+
+        const value = document.createElement("span");
+        value.textContent = count;
+
+        row.append(label, track, value);
+        container.appendChild(row);
+    });
+}
+
+function showCorrelation(data) {
+    const container = document.getElementById("correlationTable");
+    container.replaceChildren();
+
+    const table = document.createElement("table");
+    const header = table.insertRow();
+    ["Authentication event → Controller action", "Count"].forEach(text => {
+        const th = document.createElement("th");
+        th.textContent = text;
+        header.appendChild(th);
+    });
+
+    const entries = Object.entries(data || {});
+    entries.forEach(([pair, count]) => {
+        const row = table.insertRow();
+        row.insertCell().textContent = pair;
+        row.insertCell().textContent = count;
+    });
+
+    if (!entries.length) {
+        container.textContent = "No correlated events available.";
+    } else {
+        container.appendChild(table);
+    }
+}
+
+async function loadDashboard() {
+    try {
+        const response = await fetch("../../../data/analysis_report.json");
+        if (!response.ok) {
+            throw new Error("Could not load analysis_report.json");
+        }
+
+        const report = await response.json();
+
+        document.getElementById("authTotal").textContent =
+            report.total_authentication_events;
+        document.getElementById("controllerTotal").textContent =
+            report.total_controller_events;
+        document.getElementById("matchedTotal").textContent =
+            report.correlation.matched_event_pairs;
+        document.getElementById("unmatchedTotal").textContent =
+            report.correlation.unmatched_authentication_events;
+
+        showCounts("authChart", report.authentication_event_counts);
+        showCounts("controllerChart", report.controller_action_counts);
+        showCorrelation(report.correlation.matched_pair_counts);
+
+        const metrics = report.network_metrics;
+        document.getElementById("networkMetrics").textContent =
+            "Available installation-time samples: " +
+            metrics.available_installation_time_samples +
+            " | Average installation time: " +
+            (metrics.average_installation_time_ms ?? "Unavailable") +
+            " ms | Available flow-change samples: " +
+            metrics.available_flow_change_samples +
+            " | Total flows changed: " +
+            (metrics.total_flows_changed ?? "Unavailable");
+
+        document.getElementById("status").textContent =
+            "Report generated at: " + report.generated_at;
+    } catch (error) {
+        document.getElementById("status").textContent =
+            "Dashboard error: " + error.message +
+            ". Run the analysis script first, then refresh this page.";
+    }
+}
+
+loadDashboard();
+</script>
+</body>
+</html>
